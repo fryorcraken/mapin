@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MapIn - Decentralized Pin Sharing</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            overflow: hidden;
+        }
+
+        #map {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
+            height: 100vh;
+        }
+
+        #connection-status {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            background: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        #status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #ccc;
+            transition: background 0.3s ease;
+        }
+
+        #status-indicator.connecting {
+            background: #ffa500;
+            animation: pulse 1.5s infinite;
+        }
+
+        #status-indicator.connected {
+            background: #4CAF50;
+        }
+
+        #status-indicator.disconnected {
+            background: #f44336;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        #sync-status {
+            position: absolute;
+            top: 72px;
+            right: 20px;
+            z-index: 1000;
+            background: white;
+            padding: 10px 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            font-size: 13px;
+            max-width: 220px;
+            transition: opacity 0.3s ease;
+        }
+
+        #info-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 1000;
+            background: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            font-size: 13px;
+            max-width: 300px;
+        }
+
+        #info-panel h3 {
+            margin: 0 0 8px 0;
+            font-size: 16px;
+            color: #333;
+        }
+
+        #info-panel p {
+            margin: 4px 0;
+            color: #666;
+        }
+
+        .leaflet-popup-content {
+            margin: 8px 12px;
+            font-size: 13px;
+        }
+
+        .leaflet-popup-content strong {
+            display: block;
+            margin-bottom: 4px;
+            color: #333;
+        }
+
+        #sync-indicator {
+            font-size: 10px;
+            transition: color 0.3s ease;
+        }
+
+        #sync-indicator.syncing {
+            color: #ffa500;
+            animation: pulse 1.5s infinite;
+        }
+
+        #sync-indicator.synced {
+            color: #4CAF50;
+        }
+
+        #sync-indicator.warning {
+            color: #f44336;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div id="connection-status">
+        <div id="status-indicator" class="disconnected"></div>
+        <span id="status-text">Disconnected</span>
+    </div>
+
+    <div id="sync-status" style="display: block;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+            <span id="sync-indicator" class="syncing">●</span>
+            <span id="sync-text">Initializing...</span>
+        </div>
+        <div id="sync-details" style="font-size: 11px; color: #666; margin-top: 4px;">Waiting for Waku...</div>
+    </div>
+
+    <div id="info-panel">
+        <h3>MapIn</h3>
+        <p><strong>Click anywhere on the map to add a pin</strong></p>
+        <p>Pins: <span id="pin-count">0</span></p>
+        <p style="font-size: 11px; color: #999; margin-top: 8px;">
+            Pins are synchronized via Waku network
+        </p>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+
+    <!-- Protobuf.js -->
+    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.5/dist/protobuf.min.js"></script>
+
+    <!-- Waku SDK -->
+    <script type="module">
+        // Import Waku SDK
+        import {
+            createLightNode,
+            ReliableChannel,
+            HealthStatus
+        } from 'https://unpkg.com/@waku/sdk@0.0.37-339e26e.0/bundle/index.js';
+
+        // Global state
+        let map;
+        let pins = [];
+        let wakuNode = null;
+        let reliableChannel = null;
+        let senderId = null;
+        const STORAGE_KEY = 'mapin_pins';
+        const CONTENT_TOPIC = '/mapin/1/pins/proto';
+        const CHANNEL_NAME = 'mapin-global';
+
+        // Define Protobuf message structure for pins
+        const PinMessage = new protobuf.Type("PinMessage")
+            .add(new protobuf.Field("latitude", 1, "double"))
+            .add(new protobuf.Field("longitude", 2, "double"))
+            .add(new protobuf.Field("timestamp", 3, "uint64"));
+
+        // Generate unique sender ID for this client
+        function generateSenderId() {
+            return 'user-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now();
+        }
+
+        // Initialize map
+        function initMap() {
+            // Create map centered on London
+            map = L.map('map').setView([51.505, -0.09], 13);
+
+            // Add OpenStreetMap tiles
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            }).addTo(map);
+
+            // Add click listener for adding pins
+            map.on('click', onMapClick);
+
+            // Load existing pins from LocalStorage
+            loadPinsFromStorage();
+        }
+
+        // Handle map click
+        function onMapClick(e) {
+            const timestamp = Date.now();
+            const pin = {
+                latitude: e.latlng.lat,
+                longitude: e.latlng.lng,
+                timestamp: timestamp
+            };
+
+            addPin(pin);
+            broadcastPin(pin);
+        }
+
+        // Add pin to map and storage
+        function addPin(pin) {
+            // Check if pin already exists (deduplicate)
+            const pinId = `${pin.latitude}_${pin.longitude}_${pin.timestamp}`;
+            const exists = pins.some(p =>
+                `${p.latitude}_${p.longitude}_${p.timestamp}` === pinId
+            );
+
+            if (exists) {
+                console.log('Pin already exists, skipping:', pinId);
+                return;
+            }
+
+            // Add to pins array
+            pins.push(pin);
+
+            // Create marker on map
+            const marker = L.marker([pin.latitude, pin.longitude]).addTo(map);
+
+            // Add popup with timestamp
+            const date = new Date(pin.timestamp);
+            marker.bindPopup(`
+                <strong>Pin</strong><br>
+                Lat: ${pin.latitude.toFixed(5)}<br>
+                Lng: ${pin.longitude.toFixed(5)}<br>
+                Time: ${date.toLocaleString()}
+            `);
+
+            // Save to LocalStorage
+            savePinsToStorage();
+            updatePinCount();
+
+            console.log('Pin added:', pin);
+        }
+
+        // Broadcast pin via Waku
+        async function broadcastPin(pin) {
+            if (!reliableChannel) {
+                console.warn('Waku channel not ready, pin not broadcasted');
+                return;
+            }
+
+            try {
+                // Create Protobuf message
+                const protoMessage = PinMessage.create({
+                    latitude: pin.latitude,
+                    longitude: pin.longitude,
+                    timestamp: pin.timestamp
+                });
+
+                // Encode message
+                const payload = PinMessage.encode(protoMessage).finish();
+
+                // Send message and get message ID
+                const messageId = reliableChannel.send(payload);
+                console.log('Pin broadcasted via Waku (ID: ' + messageId + '):', pin);
+            } catch (error) {
+                console.error('Error broadcasting pin:', error);
+            }
+        }
+
+        // Handle incoming pin from Waku
+        function handleIncomingMessage(event) {
+            try {
+                const wakuMessage = event.detail;
+
+                // Decode Protobuf message
+                const decoded = PinMessage.decode(wakuMessage.payload);
+
+                // Convert to plain object
+                const pin = {
+                    latitude: decoded.latitude,
+                    longitude: decoded.longitude,
+                    timestamp: Number(decoded.timestamp)
+                };
+
+                // Validate pin data
+                if (!pin.latitude || !pin.longitude || !pin.timestamp) {
+                    console.warn('Invalid pin data received:', pin);
+                    return;
+                }
+
+                console.log('Pin received via Waku:', pin);
+                addPin(pin);
+            } catch (error) {
+                console.error('Error handling incoming message:', error);
+            }
+        }
+
+        // Load pins from LocalStorage
+        function loadPinsFromStorage() {
+            try {
+                const stored = localStorage.getItem(STORAGE_KEY);
+                if (stored) {
+                    pins = JSON.parse(stored);
+                    console.log(`Loaded ${pins.length} pins from LocalStorage`);
+
+                    // Add all stored pins to map
+                    pins.forEach(pin => {
+                        const marker = L.marker([pin.latitude, pin.longitude]).addTo(map);
+                        const date = new Date(pin.timestamp);
+                        marker.bindPopup(`
+                            <strong>Pin</strong><br>
+                            Lat: ${pin.latitude.toFixed(5)}<br>
+                            Lng: ${pin.longitude.toFixed(5)}<br>
+                            Time: ${date.toLocaleString()}
+                        `);
+                    });
+
+                    updatePinCount();
+                }
+            } catch (error) {
+                console.error('Error loading pins from storage:', error);
+            }
+        }
+
+        // Save pins to LocalStorage
+        function savePinsToStorage() {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(pins));
+            } catch (error) {
+                console.error('Error saving pins to storage:', error);
+            }
+        }
+
+        // Update pin count display
+        function updatePinCount() {
+            document.getElementById('pin-count').textContent = pins.length;
+        }
+
+        // Update connection status UI
+        function updateConnectionStatus(status, text) {
+            const indicator = document.getElementById('status-indicator');
+            const statusText = document.getElementById('status-text');
+
+            indicator.className = status;
+            statusText.textContent = text;
+        }
+
+        // Update sync status UI
+        function updateSyncStatus(state, detail) {
+            console.log('updateSyncStatus called:', state, detail);
+            const syncStatus = document.getElementById('sync-status');
+            const syncIndicator = document.getElementById('sync-indicator');
+            const syncText = document.getElementById('sync-text');
+            const syncDetails = document.getElementById('sync-details');
+
+            if (!syncStatus) {
+                console.error('sync-status element not found!');
+                return;
+            }
+
+            if (state === 'syncing') {
+                syncStatus.style.display = 'block';
+                syncIndicator.className = 'syncing';
+                syncText.textContent = 'Syncing';
+
+                if (detail) {
+                    const parts = [];
+                    parts.push(`Received: ${detail.received || 0}`);
+                    if (detail.missing > 0) {
+                        parts.push(`Missing: ${detail.missing}`);
+                    }
+                    if (detail.lost > 0) {
+                        parts.push(`Lost: ${detail.lost}`);
+                    }
+                    syncDetails.innerHTML = parts.join('<br>');
+                } else {
+                    syncDetails.innerHTML = '';
+                }
+                console.log('Sync status set to display: block');
+            } else if (state === 'synced') {
+                syncIndicator.className = 'synced';
+                syncText.textContent = 'Synced';
+
+                if (detail) {
+                    const parts = [];
+                    parts.push(`Received: ${detail.received || 0}`);
+                    if (detail.missing > 0) {
+                        parts.push(`Missing: ${detail.missing}`);
+                    }
+                    if (detail.lost > 0) {
+                        parts.push(`Lost: ${detail.lost}`);
+                        syncIndicator.className = 'warning';
+                    }
+                    syncDetails.innerHTML = parts.join('<br>');
+                } else {
+                    syncDetails.innerHTML = '';
+                }
+
+                // Hide sync status after 5 seconds when fully synced with no lost messages
+                if (!detail || (detail.lost === 0 && detail.missing === 0)) {
+                    setTimeout(() => {
+                        syncStatus.style.display = 'none';
+                    }, 5000);
+                }
+            } else if (state === 'hidden') {
+                syncStatus.style.display = 'none';
+            }
+        }
+
+        // Initialize Waku
+        async function initWaku() {
+            updateConnectionStatus('connecting', 'Connecting...');
+
+            try {
+                console.log('Initializing Waku light node...');
+
+                // Create light node with default bootstrap
+                wakuNode = await createLightNode({ defaultBootstrap: true });
+                console.log('Waku node created');
+
+                // Create encoder and decoder for the content topic
+                const encoder = wakuNode.createEncoder({ contentTopic: CONTENT_TOPIC });
+                const decoder = wakuNode.createDecoder({ contentTopic: CONTENT_TOPIC });
+                console.log('Encoder and decoder created');
+
+                // Generate unique sender ID for this client
+                senderId = generateSenderId();
+                console.log('Sender ID:', senderId);
+
+                // Create reliable channel
+                reliableChannel = await ReliableChannel.create(
+                    wakuNode,
+                    CHANNEL_NAME,
+                    senderId,
+                    encoder,
+                    decoder
+                );
+
+                console.log('Reliable channel created');
+                updateConnectionStatus('connected', 'Connected');
+
+                // Show initial sync status
+                updateSyncStatus('syncing', { received: 0, missing: 0, lost: 0 });
+
+                // Listen for incoming messages
+                reliableChannel.addEventListener('message-received', handleIncomingMessage);
+
+                // Listen for message status events
+                reliableChannel.addEventListener('message-sent', (event) => {
+                    console.log('Message sent successfully:', event.detail);
+                });
+
+                reliableChannel.addEventListener('message-acknowledged', (event) => {
+                    console.log('Message acknowledged:', event.detail);
+                });
+
+                reliableChannel.addEventListener('sending-message-irrecoverable-error', (event) => {
+                    console.error('Irrecoverable error sending message:', event.detail);
+                });
+
+                // Monitor sync status
+                reliableChannel.syncStatus.addEventListener('syncing', (event) => {
+                    const { received, missing, lost } = event.detail;
+                    console.log(`Syncing: ${received} received, ${missing} missing, ${lost} lost`);
+                    updateSyncStatus('syncing', event.detail);
+                });
+
+                reliableChannel.syncStatus.addEventListener('synced', (event) => {
+                    const { received, missing, lost } = event.detail;
+                    console.log(`Synced: ${received} received, ${missing} missing, ${lost} lost`);
+
+                    if (lost > 0) {
+                        console.warn(`Warning: ${lost} messages permanently lost`);
+                    }
+
+                    updateSyncStatus('synced', event.detail);
+                });
+
+                console.log('Sync status monitoring enabled');
+
+                // Monitor network health
+                wakuNode.events.addEventListener('waku:health', (event) => {
+                    const health = event.detail;
+                    console.log('Network health:', health);
+
+                    if (health === HealthStatus.SufficientlyHealthy) {
+                        updateConnectionStatus('connected', 'Connected');
+                    } else if (health === HealthStatus.MinimallyHealthy) {
+                        updateConnectionStatus('connecting', 'Degraded connection');
+                    } else {
+                        updateConnectionStatus('disconnected', 'Disconnected');
+                    }
+                });
+
+                console.log('Waku initialization complete');
+            } catch (error) {
+                console.error('Error initializing Waku:', error);
+                updateConnectionStatus('disconnected', 'Failed to connect');
+
+                // Retry after 10 seconds
+                setTimeout(() => {
+                    console.log('Retrying Waku connection...');
+                    initWaku();
+                }, 10000);
+            }
+        }
+
+        // Initialize app
+        window.addEventListener('DOMContentLoaded', () => {
+            console.log('MapIn starting...');
+            initMap();
+            initWaku();
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', async () => {
+            if (wakuNode) {
+                try {
+                    console.log('Stopping Waku node...');
+                    await wakuNode.stop();
+                } catch (error) {
+                    console.error('Error stopping Waku node:', error);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
