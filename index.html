@@ -41,11 +41,9 @@
             padding: 12px 20px;
             border-radius: 8px;
             box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-            display: flex;
-            align-items: center;
-            gap: 10px;
             font-size: 14px;
             font-weight: 500;
+            min-width: 200px;
         }
 
         #status-indicator {
@@ -72,20 +70,6 @@
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
-        }
-
-        #sync-status {
-            position: absolute;
-            top: 72px;
-            right: 20px;
-            z-index: 1000;
-            background: white;
-            padding: 10px 16px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-            font-size: 13px;
-            max-width: 220px;
-            transition: opacity 0.3s ease;
         }
 
         #info-panel {
@@ -146,16 +130,17 @@
     <div id="map"></div>
 
     <div id="connection-status">
-        <div id="status-indicator" class="disconnected"></div>
-        <span id="status-text">Disconnected</span>
-    </div>
-
-    <div id="sync-status" style="display: block;">
-        <div style="display: flex; align-items: center; gap: 8px;">
-            <span id="sync-indicator" class="syncing">●</span>
-            <span id="sync-text">Initializing...</span>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <div id="status-indicator" class="disconnected"></div>
+            <span id="status-text">Disconnected</span>
         </div>
-        <div id="sync-details" style="font-size: 11px; color: #666; margin-top: 4px;">Waiting for Waku...</div>
+        <div id="sync-status" style="display: block; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e0e0e0;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span id="sync-indicator" class="syncing">●</span>
+                <span id="sync-text">Initializing...</span>
+            </div>
+            <div id="sync-details" style="font-size: 11px; color: #666; margin-top: 4px;">Waiting for Waku...</div>
+        </div>
     </div>
 
     <div id="info-panel">
@@ -426,14 +411,10 @@
                     syncDetails.innerHTML = '';
                 }
 
-                // Hide sync status after 5 seconds when fully synced with no lost messages
-                if (!detail || (detail.lost === 0 && detail.missing === 0)) {
-                    setTimeout(() => {
-                        syncStatus.style.display = 'none';
-                    }, 5000);
-                }
+                // Keep sync status visible - do not auto-hide
             } else if (state === 'hidden') {
-                syncStatus.style.display = 'none';
+                // Keep visible even when hidden state is requested
+                syncStatus.style.display = 'block';
             }
         }
 
