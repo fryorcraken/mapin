@@ -146,6 +146,128 @@
         #add-pin-option:hover {
             background: #f0f0f0;
         }
+
+        #chat-window {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 350px;
+            height: 450px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            z-index: 9999;
+        }
+
+        #chat-header {
+            background: #4CAF50;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 12px 12px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 500;
+        }
+
+        #chat-title {
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        #chat-close {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            width: 24px;
+            height: 24px;
+            line-height: 20px;
+            opacity: 0.8;
+            transition: opacity 0.2s;
+        }
+
+        #chat-close:hover {
+            opacity: 1;
+        }
+
+        #chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .chat-message {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-width: 80%;
+        }
+
+        .chat-message.sent {
+            align-self: flex-end;
+        }
+
+        .chat-message.received {
+            align-self: flex-start;
+        }
+
+        .message-content {
+            padding: 8px 12px;
+            border-radius: 12px;
+            word-wrap: break-word;
+            font-size: 14px;
+        }
+
+        .chat-message.sent .message-content {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .chat-message.received .message-content {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .message-meta {
+            font-size: 11px;
+            color: #999;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .message-tick {
+            display: inline-block;
+            color: #4CAF50;
+            font-size: 12px;
+        }
+
+        #chat-input-container {
+            padding: 12px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        #chat-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        #chat-input:focus {
+            border-color: #4CAF50;
+        }
     </style>
 </head>
 <body>
@@ -179,6 +301,18 @@
         <div id="add-pin-option">Add pin here</div>
     </div>
 
+    <!-- Chat Window -->
+    <div id="chat-window" style="display: none;">
+        <div id="chat-header">
+            <div id="chat-title">Chat</div>
+            <button id="chat-close">×</button>
+        </div>
+        <div id="chat-messages"></div>
+        <div id="chat-input-container">
+            <input type="text" id="chat-input" placeholder="Type a message...">
+        </div>
+    </div>
+
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
@@ -203,6 +337,9 @@
         let reliableChannel = null;
         let senderId = null;
         let pendingPinLocation = null; // Store location for context menu
+        let currentChatChannel = null; // Current chat channel
+        let currentChatLocation = null; // Current chat GPS location
+        let chatMessageIds = new Map(); // Track message IDs for acknowledgments
         const STORAGE_KEY = 'mapin_pins';
         const CONTENT_TOPIC = '/mapin/1/pins/proto';
         const CHANNEL_NAME = 'mapin-global';
@@ -211,6 +348,12 @@
         const PinMessage = new protobuf.Type("PinMessage")
             .add(new protobuf.Field("latitude", 1, "double"))
             .add(new protobuf.Field("longitude", 2, "double"))
+            .add(new protobuf.Field("timestamp", 3, "uint64"));
+
+        // Define Protobuf message structure for chat messages
+        const ChatMessage = new protobuf.Type("ChatMessage")
+            .add(new protobuf.Field("text", 1, "string"))
+            .add(new protobuf.Field("sender", 2, "string"))
             .add(new protobuf.Field("timestamp", 3, "uint64"));
 
         // Generate unique sender ID for this client
@@ -318,6 +461,11 @@
                 Time: ${date.toLocaleString()}
             `);
 
+            // Add click handler to open chat
+            marker.on('click', () => {
+                openChat(pin.latitude, pin.longitude);
+            });
+
             // Save to LocalStorage
             savePinsToStorage();
             updatePinCount();
@@ -348,6 +496,199 @@
                 console.log('Pin broadcasted via Waku (ID: ' + messageId + '):', pin);
             } catch (error) {
                 console.error('Error broadcasting pin:', error);
+            }
+        }
+
+        // Open chat for a specific location
+        async function openChat(lat, lng) {
+            console.log('Opening chat for location:', lat, lng);
+
+            currentChatLocation = { lat, lng };
+
+            // Set chat title with GPS coordinates
+            const chatTitle = document.getElementById('chat-title');
+            chatTitle.textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+
+            // Clear previous messages
+            document.getElementById('chat-messages').innerHTML = '';
+            chatMessageIds.clear();
+
+            // Show chat window
+            document.getElementById('chat-window').style.display = 'flex';
+            document.getElementById('chat-input').focus();
+
+            // Close existing chat channel
+            if (currentChatChannel) {
+                console.log('Closing previous chat channel');
+                // Note: No cleanup method available in current API
+            }
+
+            // Create new chat channel for this location
+            await createChatChannel(lat, lng);
+        }
+
+        // Close chat window
+        function closeChat() {
+            document.getElementById('chat-window').style.display = 'none';
+            currentChatLocation = null;
+            // Keep channel open for background messages
+        }
+
+        // Create chat channel for specific location
+        async function createChatChannel(lat, lng) {
+            if (!wakuNode) {
+                console.error('Waku node not initialized');
+                return;
+            }
+
+            try {
+                // Create channel name from GPS coordinates (rounded to 5 decimals)
+                const channelName = `chat-${lat.toFixed(5)}-${lng.toFixed(5)}`;
+                const contentTopic = `/mapin/1/chat-${lat.toFixed(5)}-${lng.toFixed(5)}/proto`;
+
+                console.log('Creating chat channel:', channelName);
+
+                // Create encoder and decoder
+                const encoder = wakuNode.createEncoder({ contentTopic });
+                const decoder = wakuNode.createDecoder({ contentTopic });
+
+                // Create reliable channel
+                currentChatChannel = await ReliableChannel.create(
+                    wakuNode,
+                    channelName,
+                    senderId,
+                    encoder,
+                    decoder
+                );
+
+                console.log('Chat channel created:', channelName);
+
+                // Listen for incoming messages
+                currentChatChannel.addEventListener('message-received', handleChatMessage);
+
+                // Listen for acknowledgments
+                currentChatChannel.addEventListener('message-acknowledged', (event) => {
+                    const messageId = event.detail;
+                    console.log('Chat message acknowledged:', messageId);
+                    addMessageTick(messageId);
+                });
+
+                console.log('Chat channel ready');
+            } catch (error) {
+                console.error('Error creating chat channel:', error);
+            }
+        }
+
+        // Send chat message
+        async function sendChatMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+
+            if (!text || !currentChatChannel) {
+                return;
+            }
+
+            try {
+                // Create chat message
+                const chatMsg = ChatMessage.create({
+                    text: text,
+                    sender: senderId,
+                    timestamp: Date.now()
+                });
+
+                // Encode message
+                const payload = ChatMessage.encode(chatMsg).finish();
+
+                // Send message
+                const messageId = currentChatChannel.send(payload);
+                console.log('Chat message sent (ID: ' + messageId + '):', text);
+
+                // Display message locally
+                displayChatMessage(text, senderId, Date.now(), true, messageId);
+
+                // Clear input
+                input.value = '';
+            } catch (error) {
+                console.error('Error sending chat message:', error);
+            }
+        }
+
+        // Handle incoming chat message
+        function handleChatMessage(event) {
+            try {
+                const wakuMessage = event.detail;
+
+                // Decode message
+                const decoded = ChatMessage.decode(wakuMessage.payload);
+
+                // Don't display our own messages again
+                if (decoded.sender === senderId) {
+                    return;
+                }
+
+                console.log('Chat message received:', decoded.text);
+
+                // Display message
+                displayChatMessage(
+                    decoded.text,
+                    decoded.sender,
+                    Number(decoded.timestamp),
+                    false,
+                    null
+                );
+            } catch (error) {
+                console.error('Error handling chat message:', error);
+            }
+        }
+
+        // Display chat message in UI
+        function displayChatMessage(text, sender, timestamp, isSent, messageId) {
+            const messagesContainer = document.getElementById('chat-messages');
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `chat-message ${isSent ? 'sent' : 'received'}`;
+
+            if (messageId) {
+                messageDiv.dataset.messageId = messageId;
+            }
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            contentDiv.textContent = text;
+
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'message-meta';
+
+            const time = new Date(timestamp);
+            metaDiv.textContent = time.toLocaleTimeString();
+
+            if (isSent && messageId) {
+                const tickSpan = document.createElement('span');
+                tickSpan.className = 'message-tick';
+                tickSpan.style.display = 'none';
+                tickSpan.textContent = '✓';
+                metaDiv.appendChild(tickSpan);
+
+                // Store message ID for acknowledgment tracking
+                chatMessageIds.set(messageId, messageDiv);
+            }
+
+            messageDiv.appendChild(contentDiv);
+            messageDiv.appendChild(metaDiv);
+            messagesContainer.appendChild(messageDiv);
+
+            // Scroll to bottom
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        // Add tick to acknowledged message
+        function addMessageTick(messageId) {
+            const messageDiv = chatMessageIds.get(messageId);
+            if (messageDiv) {
+                const tick = messageDiv.querySelector('.message-tick');
+                if (tick) {
+                    tick.style.display = 'inline-block';
+                }
             }
         }
 
@@ -597,6 +938,16 @@
                 const contextMenu = document.getElementById('context-menu');
                 if (e.target.id !== 'add-pin-option' && !contextMenu.contains(e.target)) {
                     hideContextMenu();
+                }
+            });
+
+            // Chat window event listeners
+            document.getElementById('chat-close').addEventListener('click', closeChat);
+
+            // Send message on Enter key
+            document.getElementById('chat-input').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    sendChatMessage();
                 }
             });
 
