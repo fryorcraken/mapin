@@ -333,6 +333,7 @@
         // Global state
         let map;
         let pins = [];
+        let markers = new Map(); // Store marker references by location key
         let wakuNode = null;
         let reliableChannel = null;
         let senderId = null;
@@ -348,7 +349,8 @@
         const PinMessage = new protobuf.Type("PinMessage")
             .add(new protobuf.Field("latitude", 1, "double"))
             .add(new protobuf.Field("longitude", 2, "double"))
-            .add(new protobuf.Field("timestamp", 3, "uint64"));
+            .add(new protobuf.Field("timestamp", 3, "uint64"))
+            .add(new protobuf.Field("isActive", 4, "bool"));
 
         // Define Protobuf message structure for chat messages
         const ChatMessage = new protobuf.Type("ChatMessage")
@@ -361,7 +363,24 @@
             return 'user-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now();
         }
 
-        // Initialize map
+        // Create marker icon from SVG
+        function createMarkerIcon(color) {
+            const fillColor = color === 'green' ? '#4CAF50' : '#2196F3';
+            const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="25" height="41" viewBox="0 0 25 41">
+                <path fill="${fillColor}" stroke="#fff" stroke-width="1.5" d="M12.5 0C5.6 0 0 5.6 0 12.5c0 8.4 12.5 28.5 12.5 28.5S25 20.9 25 12.5C25 5.6 19.4 0 12.5 0z"/>
+                <circle fill="#fff" cx="12.5" cy="12.5" r="5"/>
+            </svg>`;
+            const iconUrl = 'data:image/svg+xml;base64,' + btoa(svg);
+
+            return L.icon({
+                iconUrl: iconUrl,
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34]
+            });
+        }
+
+        // Initialize mapxc
         function initMap() {
             // Create map centered on London
             map = L.map('map').setView([51.505, -0.09], 13);
@@ -423,7 +442,8 @@
             const pin = {
                 latitude: pendingPinLocation.lat,
                 longitude: pendingPinLocation.lng,
-                timestamp: timestamp
+                timestamp: timestamp,
+                isActive: false
             };
 
             addPin(pin);
@@ -449,13 +469,24 @@
             // Add to pins array
             pins.push(pin);
 
+            // Create location key for marker storage
+            const locationKey = `${pin.latitude.toFixed(5)}_${pin.longitude.toFixed(5)}`;
+
+            // Choose marker color based on active status
+            const markerColor = pin.isActive ? 'green' : 'blue';
+            const markerIcon = createMarkerIcon(markerColor);
+
             // Create marker on map
-            const marker = L.marker([pin.latitude, pin.longitude]).addTo(map);
+            const marker = L.marker([pin.latitude, pin.longitude], { icon: markerIcon }).addTo(map);
+
+            // Store marker reference
+            markers.set(locationKey, { marker, pin });
 
             // Add popup with timestamp
             const date = new Date(pin.timestamp);
+            const activeStatus = pin.isActive ? '<br><span style="color: green;">● Active</span>' : '';
             marker.bindPopup(`
-                <strong>Pin</strong><br>
+                <strong>Pin</strong>${activeStatus}<br>
                 Lat: ${pin.latitude.toFixed(5)}<br>
                 Lng: ${pin.longitude.toFixed(5)}<br>
                 Time: ${date.toLocaleString()}
@@ -470,7 +501,7 @@
             savePinsToStorage();
             updatePinCount();
 
-            console.log('Pin added:', pin);
+            console.log('Pin added:', pin, 'Active:', pin.isActive);
         }
 
         // Broadcast pin via Waku
@@ -485,7 +516,8 @@
                 const protoMessage = PinMessage.create({
                     latitude: pin.latitude,
                     longitude: pin.longitude,
-                    timestamp: pin.timestamp
+                    timestamp: pin.timestamp,
+                    isActive: pin.isActive || false
                 });
 
                 // Encode message
@@ -496,6 +528,33 @@
                 console.log('Pin broadcasted via Waku (ID: ' + messageId + '):', pin);
             } catch (error) {
                 console.error('Error broadcasting pin:', error);
+            }
+        }
+
+        // Broadcast pin active status
+        async function broadcastPinActive(lat, lng) {
+            if (!reliableChannel) {
+                console.warn('Waku channel not ready');
+                return;
+            }
+
+            try {
+                // Create message to mark pin as active
+                const protoMessage = PinMessage.create({
+                    latitude: lat,
+                    longitude: lng,
+                    timestamp: Date.now(),
+                    isActive: true
+                });
+
+                // Encode message
+                const payload = PinMessage.encode(protoMessage).finish();
+
+                // Send message
+                const messageId = reliableChannel.send(payload);
+                console.log('Pin active status broadcasted (ID: ' + messageId + '):', lat, lng);
+            } catch (error) {
+                console.error('Error broadcasting pin active status:', error);
             }
         }
 
@@ -606,6 +665,11 @@
                 // Display message locally
                 displayChatMessage(text, senderId, Date.now(), true, messageId);
 
+                // Broadcast active status on main pin channel
+                if (currentChatLocation) {
+                    broadcastPinActive(currentChatLocation.lat, currentChatLocation.lng);
+                }
+
                 // Clear input
                 input.value = '';
             } catch (error) {
@@ -704,7 +768,8 @@
                 const pin = {
                     latitude: decoded.latitude,
                     longitude: decoded.longitude,
-                    timestamp: Number(decoded.timestamp)
+                    timestamp: Number(decoded.timestamp),
+                    isActive: decoded.isActive || false
                 };
 
                 // Validate pin data
@@ -713,11 +778,66 @@
                     return;
                 }
 
-                console.log('Pin received via Waku:', pin);
-                addPin(pin);
+                console.log('Pin received via Waku:', pin, 'Active:', pin.isActive);
+
+                // Check if this is an active status update for existing pin
+                const locationKey = `${pin.latitude.toFixed(5)}_${pin.longitude.toFixed(5)}`;
+                const existingMarker = markers.get(locationKey);
+
+                if (existingMarker && pin.isActive) {
+                    // Update existing marker to active
+                    updatePinActiveStatus(pin.latitude, pin.longitude, true);
+                } else {
+                    // Add new pin
+                    addPin(pin);
+                }
             } catch (error) {
                 console.error('Error handling incoming message:', error);
             }
+        }
+
+        // Update pin active status
+        function updatePinActiveStatus(lat, lng, isActive) {
+            const locationKey = `${lat.toFixed(5)}_${lng.toFixed(5)}`;
+            const markerData = markers.get(locationKey);
+
+            if (!markerData) {
+                console.warn('No marker found for location:', locationKey);
+                return;
+            }
+
+            // Update pin object
+            markerData.pin.isActive = isActive;
+
+            // Update marker icon
+            const markerColor = isActive ? 'green' : 'blue';
+            const newIcon = createMarkerIcon(markerColor);
+
+            markerData.marker.setIcon(newIcon);
+
+            // Update popup content
+            const date = new Date(markerData.pin.timestamp);
+            const activeStatus = isActive ? '<br><span style="color: green;">● Active</span>' : '';
+            markerData.marker.setPopupContent(`
+                <strong>Pin</strong>${activeStatus}<br>
+                Lat: ${lat.toFixed(5)}<br>
+                Lng: ${lng.toFixed(5)}<br>
+                Time: ${date.toLocaleString()}
+            `);
+
+            // Update in pins array
+            const pinIndex = pins.findIndex(p =>
+                p.latitude.toFixed(5) === lat.toFixed(5) &&
+                p.longitude.toFixed(5) === lng.toFixed(5)
+            );
+            if (pinIndex !== -1) {
+                pins[pinIndex].isActive = isActive;
+            }
+
+            // Save to LocalStorage
+            savePinsToStorage();
+
+            console.log('Pin active status updated:', lat, lng, 'Active:', isActive);
         }
 
         // Load pins from LocalStorage
@@ -725,19 +845,49 @@
             try {
                 const stored = localStorage.getItem(STORAGE_KEY);
                 if (stored) {
-                    pins = JSON.parse(stored);
-                    console.log(`Loaded ${pins.length} pins from LocalStorage`);
+                    const storedPins = JSON.parse(stored);
+                    console.log(`Loaded ${storedPins.length} pins from LocalStorage`);
 
-                    // Add all stored pins to map
-                    pins.forEach(pin => {
-                        const marker = L.marker([pin.latitude, pin.longitude]).addTo(map);
+                    // Clear current pins array
+                    pins = [];
+
+                    // Add all stored pins to map using addPin function
+                    storedPins.forEach(pin => {
+                        // Create location key
+                        const locationKey = `${pin.latitude.toFixed(5)}_${pin.longitude.toFixed(5)}`;
+
+                        // Skip if already exists in markers
+                        if (markers.has(locationKey)) {
+                            return;
+                        }
+
+                        // Choose marker color based on active status
+                        const markerColor = pin.isActive ? 'green' : 'blue';
+                        const markerIcon = createMarkerIcon(markerColor);
+
+                        // Create marker on map
+                        const marker = L.marker([pin.latitude, pin.longitude], { icon: markerIcon }).addTo(map);
+
+                        // Store marker reference
+                        markers.set(locationKey, { marker, pin });
+
+                        // Add popup
                         const date = new Date(pin.timestamp);
+                        const activeStatus = pin.isActive ? '<br><span style="color: green;">● Active</span>' : '';
                         marker.bindPopup(`
-                            <strong>Pin</strong><br>
+                            <strong>Pin</strong>${activeStatus}<br>
                             Lat: ${pin.latitude.toFixed(5)}<br>
                             Lng: ${pin.longitude.toFixed(5)}<br>
                             Time: ${date.toLocaleString()}
                         `);
+
+                        // Add click handler to open chat
+                        marker.on('click', () => {
+                            openChat(pin.latitude, pin.longitude);
+                        });
+
+                        // Add to pins array
+                        pins.push(pin);
                     });
 
                     updatePinCount();
