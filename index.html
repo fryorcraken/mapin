@@ -124,6 +124,28 @@
         #sync-indicator.warning {
             color: #f44336;
         }
+
+        #context-menu {
+            position: absolute;
+            z-index: 10000;
+            background: white;
+            border-radius: 6px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            padding: 4px 0;
+            min-width: 150px;
+        }
+
+        #add-pin-option {
+            padding: 10px 16px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #333;
+            transition: background 0.2s ease;
+        }
+
+        #add-pin-option:hover {
+            background: #f0f0f0;
+        }
     </style>
 </head>
 <body>
@@ -145,11 +167,16 @@
 
     <div id="info-panel">
         <h3>MapIn</h3>
-        <p><strong>Click anywhere on the map to add a pin</strong></p>
+        <p><strong>Right-click anywhere on the map to add a pin</strong></p>
         <p>Pins: <span id="pin-count">0</span></p>
         <p style="font-size: 11px; color: #999; margin-top: 8px;">
             Pins are synchronized via Waku network
         </p>
+    </div>
+
+    <!-- Custom Context Menu -->
+    <div id="context-menu" style="display: none;">
+        <div id="add-pin-option">Add pin here</div>
     </div>
 
     <!-- Leaflet JS -->
@@ -175,6 +202,7 @@
         let wakuNode = null;
         let reliableChannel = null;
         let senderId = null;
+        let pendingPinLocation = null; // Store location for context menu
         const STORAGE_KEY = 'mapin_pins';
         const CONTENT_TOPIC = '/mapin/1/pins/proto';
         const CHANNEL_NAME = 'mapin-global';
@@ -201,24 +229,65 @@
                 attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             }).addTo(map);
 
-            // Add click listener for adding pins
-            map.on('click', onMapClick);
+            // Add right-click listener for context menu
+            map.on('contextmenu', onMapRightClick);
+
+            // Hide context menu on left click or map movement
+            map.on('click', hideContextMenu);
+            map.on('drag', hideContextMenu);
+            map.on('zoom', hideContextMenu);
 
             // Load existing pins from LocalStorage
             loadPinsFromStorage();
         }
 
-        // Handle map click
-        function onMapClick(e) {
+        // Handle map right-click (show context menu)
+        function onMapRightClick(e) {
+            // Prevent default browser context menu
+            L.DomEvent.preventDefault(e.originalEvent);
+
+            // Store the location
+            pendingPinLocation = {
+                lat: e.latlng.lat,
+                lng: e.latlng.lng,
+                containerPoint: e.containerPoint
+            };
+
+            // Position and show context menu
+            const contextMenu = document.getElementById('context-menu');
+            contextMenu.style.left = e.containerPoint.x + 'px';
+            contextMenu.style.top = e.containerPoint.y + 'px';
+            contextMenu.style.display = 'block';
+
+            console.log('Context menu shown at:', pendingPinLocation);
+        }
+
+        // Hide context menu
+        function hideContextMenu() {
+            const contextMenu = document.getElementById('context-menu');
+            contextMenu.style.display = 'none';
+            pendingPinLocation = null;
+        }
+
+        // Handle "Add pin here" click
+        function handleAddPinClick() {
+            if (!pendingPinLocation) {
+                console.warn('No pending pin location');
+                return;
+            }
+
             const timestamp = Date.now();
             const pin = {
-                latitude: e.latlng.lat,
-                longitude: e.latlng.lng,
+                latitude: pendingPinLocation.lat,
+                longitude: pendingPinLocation.lng,
                 timestamp: timestamp
             };
 
             addPin(pin);
             broadcastPin(pin);
+            hideContextMenu();
+
+            console.log('Pin added from context menu:', pin);
         }
 
         // Add pin to map and storage
@@ -519,6 +588,18 @@
         // Initialize app
         window.addEventListener('DOMContentLoaded', () => {
             console.log('MapIn starting...');
+
+            // Add click handler for context menu option
+            document.getElementById('add-pin-option').addEventListener('click', handleAddPinClick);
+
+            // Hide context menu when clicking outside
+            document.addEventListener('click', (e) => {
+                const contextMenu = document.getElementById('context-menu');
+                if (e.target.id !== 'add-pin-option' && !contextMenu.contains(e.target)) {
+                    hideContextMenu();
+                }
+            });
+
             initMap();
             initWaku();
         });
